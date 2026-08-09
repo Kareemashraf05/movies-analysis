@@ -13,9 +13,16 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import ast
+import os
+import requests
 import matplotlib.pyplot as plt
 
-from joblib import load
+from joblib import load, dump
+from sklearn.model_selection import train_test_split
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.pipeline import Pipeline
+from sklearn.ensemble import RandomForestClassifier
 
 
 st.set_page_config(page_title="Movies Dashboard", layout="wide")
@@ -28,10 +35,27 @@ st.write("The Movies Dataset (TMDB / Kaggle)")
 # Load Dataset
 # ==========================================
 
-# Put "movies_metadata.csv"
-# in a "data" folder next to kpi_dashboard.py
+# Put "movies_metadata.csv" in a "data" folder next to kpi_dashboard.py --
+# or don't, since it downloads automatically if missing (needed for cloud
+# deployment, where the repo doesn't hold the 34MB CSV)
 
-df = pd.read_csv("data/movies_metadata.csv", low_memory=False)
+CSV_PATH = "data/movies_metadata.csv"
+CSV_URL = "https://raw.githubusercontent.com/master-temp/movie-rec/main/movies_metadata.csv"
+
+
+@st.cache_data
+def load_dataset():
+    if not os.path.exists(CSV_PATH):
+        os.makedirs("data", exist_ok=True)
+        response = requests.get(CSV_URL)
+        response.raise_for_status()
+        with open(CSV_PATH, "wb") as f:
+            f.write(response.content)
+
+    return pd.read_csv(CSV_PATH, low_memory=False)
+
+
+df = load_dataset()
 
 st.success("Dataset Loaded Successfully!")
 
@@ -90,6 +114,9 @@ df["primary_genre"] = df["genre_list"].apply(
     lambda genres: genres[0] if len(genres) > 0 else "Unknown"
 )
 
+# belongs_to_collection is only populated for franchise/sequel titles
+df["is_franchise"] = df["belongs_to_collection"].notna().astype(int)
+
 print("\nCleaning Completed Successfully!")
 
 print(df.head())
@@ -99,10 +126,51 @@ print(df.head())
 # Load Trained Model
 # ==========================================
 
-try:
-    model = load("model.pkl")
-except FileNotFoundError:
-    model = None
+# On cloud deployment there's no model.pkl in the repo (too big to upload),
+# so train one on the fly the first time the app runs. @st.cache_resource
+# means this only happens once per deployment, not on every interaction.
+
+@st.cache_resource
+def get_model(_training_df):
+    if os.path.exists("model.pkl"):
+        return load("model.pkl")
+
+    model_df = _training_df[
+        (_training_df["budget"] > 0) & (_training_df["revenue"] > 0)
+    ].dropna(subset=["runtime", "primary_genre", "original_language", "release_year"])
+
+    X = model_df[
+        ["budget", "runtime", "release_year", "is_franchise", "primary_genre", "original_language"]
+    ]
+    y = (model_df["revenue"] > model_df["budget"]).astype(int)
+
+    categorical_features = ["primary_genre", "original_language"]
+
+    preprocessor = ColumnTransformer(
+        transformers=[("cat", OneHotEncoder(handle_unknown="ignore"), categorical_features)],
+        remainder="passthrough"
+    )
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.20, random_state=42, stratify=y
+    )
+
+    trained_model = Pipeline(steps=[
+        ("preprocessor", preprocessor),
+        ("classifier", RandomForestClassifier(n_estimators=200, random_state=42))
+    ])
+
+    trained_model.fit(X_train, y_train)
+
+    try:
+        dump(trained_model, "model.pkl")
+    except OSError:
+        pass  # read-only filesystem on some cloud environments -- fine, cache handles it
+
+    return trained_model
+
+
+model = get_model(df)
 
 
 # ========== Page Selector ==========
@@ -404,49 +472,42 @@ elif page == "ML Prediction":
 
     st.header("🤖 ML Prediction")
 
-    if model is None:
-        st.error(
-            "model.pkl not found -- run train_model_project.py first to "
-            "generate it, then reload this page."
-        )
+    budget_input = st.number_input("Budget ($)", min_value=0, value=20000000, step=1000000)
 
-    else:
-        budget_input = st.number_input("Budget ($)", min_value=0, value=20000000, step=1000000)
+    runtime_input = st.number_input("Runtime (minutes)", min_value=0, value=100)
 
-        runtime_input = st.number_input("Runtime (minutes)", min_value=0, value=100)
+    release_year_input = st.number_input("Release Year", min_value=1900, max_value=2030, value=2020)
 
-        release_year_input = st.number_input("Release Year", min_value=1900, max_value=2030, value=2020)
+    franchise_input = st.checkbox("Part of a franchise / collection (e.g. a sequel)?")
 
-        franchise_input = st.checkbox("Part of a franchise / collection (e.g. a sequel)?")
+    genre_input = st.selectbox(
+        "Primary Genre",
+        sorted(df["primary_genre"].unique().tolist())
+    )
 
-        genre_input = st.selectbox(
-            "Primary Genre",
-            sorted(df["primary_genre"].unique().tolist())
-        )
+    language_input = st.selectbox(
+        "Original Language",
+        sorted(df["original_language"].dropna().unique().tolist())
+    )
 
-        language_input = st.selectbox(
-            "Original Language",
-            sorted(df["original_language"].dropna().unique().tolist())
-        )
+    if st.button("Predict"):
+        input_data = pd.DataFrame({
+            "budget": [budget_input],
+            "runtime": [runtime_input],
+            "release_year": [release_year_input],
+            "is_franchise": [int(franchise_input)],
+            "primary_genre": [genre_input],
+            "original_language": [language_input]
+        })
 
-        if st.button("Predict"):
-            input_data = pd.DataFrame({
-                "budget": [budget_input],
-                "runtime": [runtime_input],
-                "release_year": [release_year_input],
-                "is_franchise": [int(franchise_input)],
-                "primary_genre": [genre_input],
-                "original_language": [language_input]
-            })
+        prediction = model.predict(input_data)
+        probability = model.predict_proba(input_data)
 
-            prediction = model.predict(input_data)
-            probability = model.predict_proba(input_data)
-
-            if prediction[0] == 1:
-                st.success(
-                    f"Profitable -- Probability: {probability[0][1]:.2%}"
-                )
-            else:
-                st.error(
-                    f"Not Profitable -- Probability: {probability[0][0]:.2%}"
-                )
+        if prediction[0] == 1:
+            st.success(
+                f"Profitable -- Probability: {probability[0][1]:.2%}"
+            )
+        else:
+            st.error(
+                f"Not Profitable -- Probability: {probability[0][0]:.2%}"
+            )
