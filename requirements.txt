@@ -1,0 +1,37 @@
+MOVIES PROJECT -- WHAT WE USED
+================================
+
+LIBRARIES (tools)
+------------------
+pandas       - loads and cleans the data
+numpy        - number crunching
+matplotlib   - makes the charts
+seaborn      - makes charts look nicer
+streamlit    - builds the dashboard website
+scikit-learn - builds and tests the prediction model
+joblib       - saves/loads the trained model
+ast          - reads the genre data (it's stored in a weird text format)
+
+
+ALGORITHM (the model)
+-----------------------
+Random Forest Classifier
+- A model made of many decision trees that vote together on the answer.
+- We use it to predict: will this movie be profitable? (yes/no)
+
+
+HOW WE MEASURE IF IT'S GOOD
+-----------------------------
+Accuracy    - % of guesses that were correct overall
+Precision   - when it says "profitable," how often is that true
+Recall      - of all the actually profitable movies, how many did it catch
+F1 Score    - a blend of precision and recall
+ROC AUC     - how good the model is at telling profitable vs not, in general
+
+
+FILES IN THIS PROJECT
+------------------------
+main.py / src/            - the original code, split into pieces
+movies_kpi_analysis.ipynb - notebook version, same thing
+kpi_dashboard.py          - the website with charts + predictions
+train_model_project.py    - trains the model and saves it
